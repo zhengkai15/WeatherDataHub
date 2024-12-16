@@ -57,7 +57,8 @@ WeatherDataHub/
 ├── README.md               # 项目说明文档
 ├── requirements.txt        # 依赖库清单
 ```
-[data_visual](git@github.com:zhengkai15/WeatherVis.git)
+
+[data_visual](https://github.com/zhengkai15/WeatherVis.git)
 
 ### 依赖库
 
