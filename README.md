@@ -45,8 +45,8 @@ WeatherDataHub/
 │   ├── radar/              # 雷达数据处理
 │   ├── satellite/          # 卫星数据处理
 │   ├── station/            # 站点数据处理
-│   ├── common/              # 通用处理脚本
-│   ├── utils/               # 工具函数库
+│   ├── common/             # 通用处理脚本
+│   ├── utils/              # 工具函数库
 │   ├── io.py               # 数据读取与写入
 │── data_eda/               # 数据探索
 │   ├── data_cor/           # 相关性分析
