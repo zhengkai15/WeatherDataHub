@@ -241,3 +241,89 @@ def generate_era5(basename="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/da
         data = data.transpose('variable', 'time', 'channel', 'lat', 'lon')
     data  = data.isel(variable=0).drop_vars("variable").to_dataset(name="data")
     return data
+
+
+# ec fc0
+import pygrib
+def extract_and_save_ec_time_slice(grib_file_path, output_file_path, date_index, time_index):
+    # date_index :20240101
+    # time_index : {'00': 0, '06': 600, '12': 1200, '18': 1800}.values
+    
+    # 打开 GRIB 文件
+    with pygrib.open(grib_file_path) as grbs:
+        # 获取指定时间片的消息
+        grb_messages = [grb for grb in grbs if (grb['dataDate'] == int(date_index) and grb['time'] == time_index)]
+
+    if not grb_messages:
+        raise ValueError(f"No data found for time index {date_index}")
+
+    # 创建一个新的 GRIB 文件并写入提取的消息
+    with open(output_file_path, 'wb') as output_file:
+        for grb in grb_messages:
+            output_file.write(grb.tostring())
+
+
+def get_save_name_pattern(flag, date_index):
+    # date_index :20240101
+    # flags = ['00', '06', '12', '18']
+
+    # save_name_pattern
+    if flag in ['00', '12']:
+        init_time_path = '00_12'
+        save_name_pattern = {
+            'pl': f'A1D{date_index[-4:]}{flag}00{date_index[-4:]}{flag}011',
+            'sfc': f'A2D{date_index[-4:]}{flag}00{date_index[-4:]}{flag}011',
+            'ocean': f'T3P{date_index[-4:]}{flag}00{date_index[-4:]}{flag}011',
+        }
+    elif flag in ['06', '18']:
+        init_time_path = '06_18'
+        save_name_pattern = {
+            'pl': f'A1S{date_index[-4:]}{flag}00{date_index[-4:]}{flag}011',
+            'sfc': f'A2S{date_index[-4:]}{flag}00{date_index[-4:]}{flag}011',
+            'ocean': f'T3Q{date_index[-4:]}{flag}00{date_index[-4:]}{flag}011',
+        }
+    else:
+        raise ValueError("Invalid flag")
+    return save_name_pattern, init_time_path
+
+
+# fuxi-ens
+def merge_output(output_dir, init_time, save_type='nc', member_max_num=2, step_min_num=0, step_max_num=8):
+    save_name = os.path.join(output_dir, f'{init_time.strftime("%Y%m%d-%H")}', f"output.nc")
+
+    if os.path.exists(save_name):
+        # os.remove(save_name)
+        return
+    else:        
+        # 使用 glob 匹配所有文件，并筛选出需要的文件
+        file_names = sorted(
+            glob.glob(os.path.join(output_dir, init_time.strftime("%Y%m%d-%H"), "member_[0-9][0-9][0-9]/[0-9][0-9][0-9].nc"), recursive=True)
+        )
+        # 过滤出 member_000 到 member_{member_max} 的文件夹，并匹配步数范围内的文件
+        file_names = [
+            file for file in file_names
+            if 0 <= int(os.path.basename(os.path.dirname(file)).split('_')[1]) <= member_max_num + 1
+            and step_min_num <= int(os.path.basename(file).split('.')[0]) <= step_max_num
+        ]
+        assert len(file_names) > 0, f"No files found in {output_dir}"
+
+        ds = xr.open_mfdataset(
+            file_names, engine="zarr" if save_type == "zarr" else "netcdf4",
+        ).chunk({'time': 1, 'step': 1})
+        # ds = ensemble_mean(ds)
+        # save_with_progress(ds, save_name)
+        ds = ds.chunk(dict(member=-1))
+        return ds
+        
+
+@timing_decorator
+def step_to_time(ds):# 提取 time 和 step
+    time_value = ds['time'].values[0]  # 单一时间值
+    time_value = ds['time'].values[0] + np.timedelta64(8, 'h')
+    step_values = ds['step'].values  # 多个 step 值
+
+    # 计算新的 time 值: time + step * 6 小时
+    new_time_values = time_value + np.timedelta64(6, 'h') * step_values 
+    # 将 step 维度修改为新的 time
+    ds = ds.rename({"time":"init_time"}).assign_coords(step=new_time_values).rename({"step":"time"})
+    return ds
