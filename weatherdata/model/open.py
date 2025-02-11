@@ -1,5 +1,7 @@
+import os
 import numpy as np
 import xarray as xr
+from datetime import datetime
 
 def update_dims_grib(ds, level_type='surface'):
     ds = ds.expand_dims(["valid_time", "time"])
@@ -314,9 +316,7 @@ def merge_output(output_dir, init_time, save_type='nc', member_max_num=2, step_m
         # save_with_progress(ds, save_name)
         ds = ds.chunk(dict(member=-1))
         return ds
-        
 
-@timing_decorator
 def step_to_time(ds):# 提取 time 和 step
     time_value = ds['time'].values[0]  # 单一时间值
     time_value = ds['time'].values[0] + np.timedelta64(8, 'h')
@@ -326,4 +326,152 @@ def step_to_time(ds):# 提取 time 和 step
     new_time_values = time_value + np.timedelta64(6, 'h') * step_values 
     # 将 step 维度修改为新的 time
     ds = ds.rename({"time":"init_time"}).assign_coords(step=new_time_values).rename({"step":"time"})
+    return ds
+
+
+
+# hres
+def read_hres_fcst(file_path):
+    ds = xr.open_dataset(file_path, engine='cfgrib',backend_kwargs={'filter_by_keys':{'typeOfLevel':'surface', 'edition': 1}})[["u10","v10"]]
+    ds = update_dims_grib(ds, level_type='surface')
+    ds = ds.to_array().to_dataset(name="data").rename(variable="channel").drop_vars(["surface","step","number"])
+    ds = ds.assign_coords(lon=((ds.lon + 360) % 360))
+    ds = ds.sortby('lon', ascending=True)
+    return ds
+
+def get_hres_file_ls(init_time, data_path, file_type):
+    # file_type : 数据类型 A1 A2 T1 T2 T3 
+    fn_path = os.path.join(data_path, init_time.strftime("%Y%m%d%H"))
+    try:
+        os.chmod(fn_path, 0o777)  # 八进制表示法
+    except PermissionError:
+        print(f"Permission denied: unable to change permissions for {fn_path}")
+    except FileNotFoundError:
+        print(f"Folder not found: {fn_path}")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        
+    fn_ls = [[init_time.strftime("%Y")+ifn[11:-3], os.path.join(fn_path, ifn)] for ifn in os.listdir(fn_path) if ifn.startswith(file_type) and ifn.endswith("001")]
+    timeStamp_dict = {}
+    timeStamp_ls = []
+    fn_ls.sort()
+    for ifn_ in fn_ls:
+        if ifn_[0].endswith("."):
+            continue
+        elif int(ifn_[0][-2:]) % 1 == 0:
+            itstamp = np.datetime64(datetime.strptime(ifn_[0], '%Y%m%d%H'))
+        else:
+            continue
+        timeStamp_dict[itstamp] = ifn_[1]
+        timeStamp_ls.append(itstamp)
+    file_ls = []
+    for ikey, ival in timeStamp_dict.items():
+        file_ls.append(ival)
+    timeStamp_ls.sort()
+    return file_ls
+
+def hres_data_read(fn_ls, N_CORE=10):
+    from multiprocessing import Pool
+    from tqdm import tqdm
+    pool = Pool(N_CORE)
+    pbar = tqdm(total=len(fn_ls))
+    pbar.set_description(f'ec data reading')
+    update = lambda *args: pbar.update()
+    processes = [pool.apply_async(read_hres_fcst, args=(filename,),  callback=update) for filename in fn_ls]
+    ds_all = []
+    for values in processes:
+        ds_all.append(values.get())
+    ds_all = xr.concat(ds_all, dim='time')
+    ds_all = ds_all.sortby('time')
+    return ds_all
+
+
+def hres_data_processing(data_path, init_time):
+    fn_ls = get_hres_file_ls(init_time=init_time, data_path=data_path, file_type='T2')
+    ds = hres_data_read(fn_ls)
+    ds = chunk(ds, channel="channel")
+    return ds
+
+# ens
+
+def get_ens_file_ls(init_time, ens_path):
+    fn_path = os.path.join(ens_path, init_time.strftime("%Y%m%d%H"))
+    try:
+        os.chmod(fn_path, 0o777)  # 八进制表示法
+    except PermissionError:
+        print(f"Permission denied: unable to change permissions for {fn_path}")
+    except FileNotFoundError:
+        print(f"Folder not found: {fn_path}")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        
+    fn_ls = [[init_time.strftime("%Y")+ifn[11:-3], os.path.join(fn_path, ifn)] for ifn in os.listdir(fn_path)]
+    timeStamp_dict = {}
+    timeStamp_ls = []
+    fn_ls.sort()
+    for ifn_ in fn_ls:
+        if ifn_[0].endswith("."):
+            continue
+        elif int(ifn_[0][-2:])%6==0:
+            itstamp = np.datetime64(datetime.strptime(ifn_[0], '%Y%m%d%H'))
+        else:
+            continue
+        timeStamp_dict[itstamp] = ifn_[1]
+        timeStamp_ls.append(itstamp)
+    file_ls = []
+    for ikey, ival in timeStamp_dict.items():
+        file_ls.append(ival)
+    timeStamp_ls.sort()
+    return file_ls
+
+def ens_read(ifn):
+    ds_0 = xr.open_dataset(ifn, engine='cfgrib',backend_kwargs={'filter_by_keys':{'typeOfLevel':'surface', 'dataType':'pf', 'edition':1}})
+    ds_1 = xr.open_dataset(ifn, engine='cfgrib',backend_kwargs={'filter_by_keys': {'typeOfLevel': 'surface', 'dataType': 'cf', 'edition':1}})
+    ds = xr.concat([ds_0, ds_1], dim='number')
+    ds = update_dims(ds)
+    return ds
+
+# # simgle processing
+# def ens_data_read(fn_ls,):
+#     ds_all = None
+#     for idx,ifn_ in enumerate(fn_ls):
+#         ids = ens_read(ifn_)
+#         if ds_all is None:
+#             ds_all = ids
+#         else:
+#             ds_all = xr.concat([ds_all, ids], dim='time')
+#             # break
+#     ds_all = ds_all.sortby('time')
+#     return ds_all
+
+# multiprocessing
+def ens_data_read(fn_ls, N_CORE=10):
+    from multiprocessing import Pool
+    from tqdm import tqdm
+    pool = Pool(N_CORE)
+    pbar = tqdm(total=len(fn_ls))
+    pbar.set_description(f'ec data reading')
+    update = lambda *args: pbar.update()
+    processes = [pool.apply_async(ens_read, args=(filename,),  callback=update) for filename in fn_ls]
+    ds_all = []
+    for values in processes:
+        ds_all.append(values.get())
+    ds_all = xr.concat(ds_all, dim='time')
+    ds_all = ds_all.sortby('time')
+    ds_all = ds_all.drop_vars(['step','surface']).to_array().rename({"variable":"channel"}).to_dataset(name='data')
+    return ds_all
+
+
+def ens_data_processing(init_time, ens_path, N_CORE=10, member_max_num=51,step_min_num=0,step_max_num=2, zone=None):
+    fn_ls = get_ens_file_ls(init_time, ens_path)[step_min_num:step_max_num+1] # step_min_num, step_max_num+2,right=True 去掉一个初始场
+    ds = ens_data_read(fn_ls, N_CORE).isel(member=slice(0,member_max_num))
+    ds = deal_tp(ds).isel(time=slice(1, None)) # 降水diff之后去掉第一个时间片
+    ds = deal_10m(ds)
+    # ds = append_ws(ds)# 服务代码中去增加风速
+    ds = ds.chunk({'time': 1, 'init_time': 1})
+    ds = ds.chunk(dict(member=-1))
+    lon_min, lon_max, lat_min, lat_max = zone
+    new_lat = np.arange(lat_min, lat_max+0.25, 0.25)[::-1]  # 0.25° 分辨率的纬度
+    new_lon = np.arange(lon_min, lon_max+0.25, 0.25)  # 0.25° 分辨率的经度
+    ds = ds.interp(lat=new_lat, lon=new_lon, method="nearest")
     return ds
