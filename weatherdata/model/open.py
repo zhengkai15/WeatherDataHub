@@ -332,16 +332,25 @@ def step_to_time(ds):# 提取 time 和 step
 
 # hres
 def read_hres_fcst(file_path):
-    ds = xr.open_dataset(file_path, engine='cfgrib',backend_kwargs={'filter_by_keys':{'typeOfLevel':'surface', 'edition': 1}})[["u10","v10"]]
+    ds = xr.open_dataset(file_path, engine='cfgrib',backend_kwargs={'filter_by_keys':{'typeOfLevel':'surface', 'edition': 1}})
     ds = update_dims_grib(ds, level_type='surface')
-    ds = ds.to_array().to_dataset(name="data").rename(variable="channel").drop_vars(["surface","step","number"])
+    ds = ds.to_array().to_dataset(name="data").rename(variable="channel")
+    coord_names = list(ds._coord_names)
+    data_dims = list(ds['data'].dims)
+
+    # 利用集合的对称差运算符找出不相同的部分
+    unique_list = list(set(coord_names) ^ set(data_dims))
+    ds = ds.drop_vars(unique_list)
     ds = ds.assign_coords(lon=((ds.lon + 360) % 360))
     ds = ds.sortby('lon', ascending=True)
     return ds
 
 def get_hres_file_ls(init_time, data_path, file_type):
     # file_type : 数据类型 A1 A2 T1 T2 T3 
-    fn_path = os.path.join(data_path, init_time.strftime("%Y%m%d%H"))
+    if file_type == "C1":
+        fn_path = os.path.join(data_path, init_time.strftime("%Y%m%d/%H"))
+    else:
+        fn_path = os.path.join(data_path, init_time.strftime("%Y%m%d%H"))
     try:
         os.chmod(fn_path, 0o777)  # 八进制表示法
     except PermissionError:
@@ -351,7 +360,7 @@ def get_hres_file_ls(init_time, data_path, file_type):
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         
-    fn_ls = [[init_time.strftime("%Y")+ifn[11:-3], os.path.join(fn_path, ifn)] for ifn in os.listdir(fn_path) if ifn.startswith(file_type) and ifn.endswith("001")]
+    fn_ls = [[init_time.strftime("%Y")+ifn[11:-3], os.path.join(fn_path, ifn)] for ifn in os.listdir(fn_path) if ifn.startswith(file_type) and ifn.endswith("001") and not ifn.endswith(".idx") ]
     timeStamp_dict = {}
     timeStamp_ls = []
     fn_ls.sort()
@@ -386,8 +395,8 @@ def hres_data_read(fn_ls, N_CORE=10):
     return ds_all
 
 
-def hres_data_processing(data_path, init_time):
-    fn_ls = get_hres_file_ls(init_time=init_time, data_path=data_path, file_type='T2')
+def hres_data_processing(data_path, init_time, file_type='T2'):
+    fn_ls = get_hres_file_ls(init_time=init_time, data_path=data_path, file_type=file_type)
     ds = hres_data_read(fn_ls)
     ds = chunk(ds, channel="channel")
     return ds
