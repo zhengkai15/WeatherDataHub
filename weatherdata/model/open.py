@@ -1,10 +1,25 @@
+
 import os
+import numpy as np
+import pandas as pd
 import numpy as np
 import xarray as xr
 from datetime import datetime
+from dask.diagnostics import ProgressBar
+from .config import Era5_Conf
 
-def update_dims_grib(ds, level_type='surface'):
-    ds = ds.expand_dims(["valid_time", "time"])
+import warnings
+warnings.filterwarnings("ignore")
+
+def remove_unused_coords(ds):
+        coord_names = list(ds._coord_names)
+        data_dims = list(ds['data'].dims)
+        unique_list = list(set(coord_names) ^ set(data_dims))
+        return ds.drop_vars(unique_list)
+    
+def update_dims(ds, level_type='surface'):
+    if "valid_time" not in ds:
+        ds = ds.expand_dims(["valid_time", "time"])
     name_dict = {
         "lead_time": "step",
         "prediction_timedelta": "step",
@@ -13,7 +28,8 @@ def update_dims_grib(ds, level_type='surface'):
         "longitude": "lon",
         "number": "member",
         "time":"init_time",
-        "valid_time":"time"
+        "valid_time":"time",
+        "pressure_level":"level",
     }
     if isinstance(ds, xr.DataArray):
         dims = {k: name_dict.get(k, k) for k in ds.dims}
@@ -33,121 +49,6 @@ def update_dims_grib(ds, level_type='surface'):
             ds = ds.rename({'v10': 'v10m'})
     return ds
 
-def process_cmc_grib_data(file_path):
-    """
-    Processes GRIB data for East China and global pressure levels.
-
-    Parameters:
-    file_path (str): The path to the GRIB file to be processed.
-
-    Returns:
-    tuple: A tuple containing two xarray.Dataset objects. The first dataset represents the surface data for East China, and the second dataset represents the pressure level data for global coverage.
-    """
-    # Process surface data for East China
-    ds_surface = xr.open_dataset(file_path, engine="cfgrib", backend_kwargs={'filter_by_keys': {'typeOfLevel': 'surface', 'edition': 1}})
-    ds_surface_ptype = xr.open_dataset(file_path, engine="cfgrib", backend_kwargs={'filter_by_keys': {'typeOfLevel': 'surface', 'edition': 2}})
-    ds_surface = update_dims_grib(ds_surface, level_type='surface')  # east china
-    ds_surface_ptype = update_dims_grib(ds_surface_ptype, level_type='pl')  # east china
-    ds_surface = ds_surface.to_array().to_dataset(name="data").rename(variable="channel")
-    ds_surface_ptype = ds_surface_ptype.to_array().to_dataset(name="data").rename(variable="channel")
-    ds_surface = xr.concat([ds_surface, ds_surface_ptype], dim="channel").drop_vars(["surface","step","number"])
-
-    # Process pressure level data for global coverage
-    ds_pl = xr.open_dataset(file_path, engine="cfgrib", backend_kwargs={'filter_by_keys': {'typeOfLevel': 'isobaricInhPa', 'edition': 1}})
-    ds_pl = update_dims_grib(ds_pl, level_type='pl')
-    ds_pl = ds_pl.to_array().to_dataset(name="data").rename(variable="channel")
-    levels = ds_pl.to_array().level.values
-    print(levels)
-    ds_ps_res = []
-    for var_pl_cur in ds_pl.to_array().channel.values:
-        ds_pl_var_cur = ds_pl.sel(channel=[var_pl_cur])
-        for level_cur in levels:
-            level_cur = int(level_cur)
-            ds_var_cur_level_cur = ds_pl_var_cur.sel(level=level_cur).assign_coords(channel=[f"{var_pl_cur}{level_cur}"])
-            ds_ps_res.append(ds_var_cur_level_cur)
-    ds_pl = xr.concat(ds_ps_res, dim="channel").drop_vars(["level","step","number"])  # global
-    return ds_surface, ds_pl
-
-
-def process_ec_grib_data(file_path):
-    """
-    Processes GRIB data for surface and pressure levels.
-
-    Parameters:
-    file_path (str): The path to the GRIB file to be processed.
-
-    Returns:
-    xarray.Dataset: A concatenated dataset containing both surface and pressure level data.
-    """
-    # Process surface data
-    ds_surface = xr.open_dataset(file_path, engine="cfgrib", backend_kwargs={'filter_by_keys': {'typeOfLevel': 'surface'}})
-    ds_surface = update_dims_grib(ds_surface, level_type='surface').drop_vars(["surface","step"])
-    ds_surface = ds_surface.to_array().to_dataset(name="data").rename(variable="channel")
-
-    # Process pressure level data
-    ds_pl = xr.open_dataset(file_path, engine="cfgrib", backend_kwargs={'filter_by_keys': {'typeOfLevel': 'isobaricInhPa'}})
-    ds_pl = update_dims_grib(ds_pl,level_type='surface')
-    ds_pl = ds_pl.to_array().to_dataset(name="data").rename(variable="channel")
-    levels = ds_pl.to_array().level.values
-    print(levels)
-    ds_ps_res = []
-    for var_pl_cur in ds_pl.to_array().channel.values:
-        ds_pl_var_cur = ds_pl.sel(channel=[var_pl_cur])
-        for level_cur in levels:
-            level_cur = int(level_cur)
-            ds_var_cur_level_cur = ds_pl_var_cur.sel(level=level_cur).assign_coords(channel=[f"{var_pl_cur}{level_cur}"])
-            ds_ps_res.append(ds_var_cur_level_cur)
-    ds_pl = xr.concat(ds_ps_res, dim="channel").drop_vars(["level","step"])
-    # Update dimensions and drop unnecessary variables
-    # Concatenate datasets
-    ds = xr.concat([ds_surface,ds_pl], dim="channel")  # east china
-    return ds
-
-var_needed_dic = dict(
-    t2m='2m_temperature',
-    u10m='10m_u_component_of_wind',
-    v10m='10m_v_component_of_wind',
-    msl='mean_sea_level_pressure',
-    tp='total_precipitation',
-    d2m='2m_dewpoint_temperature',
-    sst='sea_surface_temperature',
-    u100m='100m_u_component_of_wind',
-    v100m='100m_v_component_of_wind',
-    lcc='low_cloud_cover',
-    mcc='medium_cloud_cover',
-    hcc='high_cloud_cover',
-    tcc='total_cloud_cover',
-    ssr='surface_net_solar_radiation',
-    ssrd='surface_solar_radiation_downwards',
-    fdir='total_sky_direct_solar_radiation_at_surface',
-    ttr='top_net_thermal_radiation',
-    mdts='mean_direction_of_total_swell',
-    mdww='mean_direction_of_wind_waves',
-    mpts='mean_period_of_total_swell',
-    mpww='mean_period_of_wind_waves',
-    shts='significant_height_of_total_swell',
-    shww='significant_height_of_wind_waves'
-)
-
-var_needed_pl_dic = dict(
-    z='geopotential',
-    t='temperature',
-    u='u_component_of_wind',
-    v='v_component_of_wind',
-    q='specific_humidity',
-)
-
-levels=[50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
-
-
-import os
-import xarray as xr
-import pandas as pd
-import numpy as np
-import warnings
-warnings.filterwarnings("ignore")
-from dask.diagnostics import ProgressBar
-
 
 def chunk(ds, channel):
     '''
@@ -163,23 +64,92 @@ def chunk(ds, channel):
     return ds
 
 
-def update_dims_era5(ds):
-    if 'valid_time' in ds.dims:
-        ds = ds.rename({'valid_time': 'time'})
-    if 'pressure_level' in ds.dims:
-        ds = ds.rename({'pressure_level': 'level'})
-    return ds
-
-def transform_concat(var_ds, var_name):
+def level2channel(var_ds, var_name):
     var_ds = chunk(var_ds, 'level')
     var_ds = var_ds.to_array()
     var_ds = var_ds.expand_dims({'level': [1]}, axis=1)
-    var_ds = var_ds.rename({'level': 'channel', 'latitude': 'lat', 'longitude': 'lon'})
+    var_ds = var_ds.rename({'level': 'channel'})
     var_ds = var_ds.assign_coords(channel=[var_name], variable=['data'])
     var_ds = var_ds.to_dataset(name='data')
     return chunk(var_ds, 'channel').data
 
-def generate_era5(basename="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/era5/from_official",init_time="2024-11-09 00:00:00",fcst_days=2):
+
+def process_cmc_grib_data(file_path):
+    """
+    Processes GRIB data for East China and global pressure levels.
+
+    Parameters:
+    file_path (str): The path to the GRIB file to be processed.
+
+    Returns:
+    tuple: A tuple containing two xarray.Dataset objects. The first dataset represents the surface data for East China, and the second dataset represents the pressure level data for global coverage.
+    """
+    # Process surface data for East China
+    ds_surface = xr.open_dataset(file_path, engine="cfgrib", backend_kwargs={'filter_by_keys': {'typeOfLevel': 'surface', 'edition': 1}})
+    ds_surface_ptype = xr.open_dataset(file_path, engine="cfgrib", backend_kwargs={'filter_by_keys': {'typeOfLevel': 'surface', 'edition': 2}})
+    ds_surface = update_dims(ds_surface, level_type='surface')  # east china
+    ds_surface_ptype = update_dims(ds_surface_ptype, level_type='pl')  # east china
+    ds_surface = ds_surface.to_array().to_dataset(name="data").rename(variable="channel")
+    ds_surface_ptype = ds_surface_ptype.to_array().to_dataset(name="data").rename(variable="channel")
+    ds_surface = xr.concat([ds_surface, ds_surface_ptype], dim="channel")
+    ds_surface = remove_unused_coords(ds_surface)
+
+    # Process pressure level data for global coverage
+    ds_pl = xr.open_dataset(file_path, engine="cfgrib", backend_kwargs={'filter_by_keys': {'typeOfLevel': 'isobaricInhPa', 'edition': 1}})
+    ds_pl = update_dims(ds_pl, level_type='pl')
+    ds_pl = ds_pl.to_array().to_dataset(name="data").rename(variable="channel")
+    levels = ds_pl.to_array().level.values
+    print(levels)
+    ds_ps_res = []
+    for var_pl_cur in ds_pl.to_array().channel.values:
+        ds_pl_var_cur = ds_pl.sel(channel=[var_pl_cur])
+        for level_cur in levels:
+            level_cur = int(level_cur)
+            ds_var_cur_level_cur = ds_pl_var_cur.sel(level=level_cur).assign_coords(channel=[f"{var_pl_cur}{level_cur}"])
+            ds_ps_res.append(ds_var_cur_level_cur)
+    ds_pl = xr.concat(ds_ps_res, dim="channel")  # global
+    ds_pl = remove_unused_coords(ds_pl)
+    return ds_surface, ds_pl
+
+
+def process_ec_grib_data(file_path):
+    """
+    Processes GRIB data for surface and pressure levels.
+
+    Parameters:
+    file_path (str): The path to the GRIB file to be processed.
+
+    Returns:
+    xarray.Dataset: A concatenated dataset containing both surface and pressure level data.
+    """
+    # Process surface data
+    ds_surface = xr.open_dataset(file_path, engine="cfgrib", backend_kwargs={'filter_by_keys': {'typeOfLevel': 'surface'}})
+    ds_surface = update_dims(ds_surface, level_type='surface')
+    ds_surface = remove_unused_coords(ds_surface)
+    ds_surface = ds_surface.to_array().to_dataset(name="data").rename(variable="channel")
+
+    # Process pressure level data
+    ds_pl = xr.open_dataset(file_path, engine="cfgrib", backend_kwargs={'filter_by_keys': {'typeOfLevel': 'isobaricInhPa'}})
+    ds_pl = update_dims(ds_pl,level_type='surface')
+    ds_pl = ds_pl.to_array().to_dataset(name="data").rename(variable="channel")
+    levels = ds_pl.to_array().level.values
+    print(levels)
+    ds_ps_res = []
+    for var_pl_cur in ds_pl.to_array().channel.values:
+        ds_pl_var_cur = ds_pl.sel(channel=[var_pl_cur])
+        for level_cur in levels:
+            level_cur = int(level_cur)
+            ds_var_cur_level_cur = ds_pl_var_cur.sel(level=level_cur).assign_coords(channel=[f"{var_pl_cur}{level_cur}"])
+            ds_ps_res.append(ds_var_cur_level_cur)
+    ds_pl = xr.concat(ds_ps_res, dim="channel")
+    ds_pl = remove_unused_coords(ds_pl)
+    # Update dimensions and drop unnecessary variables
+    # Concatenate datasets
+    ds = xr.concat([ds_surface,ds_pl], dim="channel")  # east china
+    return ds
+
+
+def generate_era5(basename="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/era5/from_official",init_time="2024-11-09 00:00:00",fcst_days=2, version="c88"):
     '''
     init_time:2024-11-09 00:00:00'
     basename:/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/era5/from_official
@@ -200,7 +170,13 @@ def generate_era5(basename="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/da
         years.append((init_time + pd.Timedelta(f"{fcst_day}D")).strftime("%Y"))
 
     years = list(set(years))
-    # sfc
+    era5_conf = Era5_Conf(version = version)
+    var_needed_dic = era5_conf.var_needed_dic
+    var_needed_pl_dic = era5_conf.var_needed_pl_dic
+    levels = era5_conf.levels
+    
+    # sfc and wave
+    data = None
     for idx, var in enumerate(var_needed_dic):
         var_need_path = os.path.join(basename, 'surface_level')
         var_ds = []
@@ -208,16 +184,15 @@ def generate_era5(basename="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/da
             var_path = os.path.join(var_need_path, var_needed_dic.get(var), f'{year}')
             print(var, var_path)
             var_year_idx = xr.open_mfdataset(get_filenames(var_path))
-            var_year_idx = update_dims_era5(var_year_idx)
+            var_year_idx = update_dims(var_year_idx)
             if ('waves' in var_needed_dic.get(var) or 'swell' in var_needed_dic.get(var)):
-                # print(var_needed_dic.get(var))
                 var_year_idx = var_year_idx.interp(longitude=np.arange(0, 360, 0.25),
                                                    latitude=np.arange(90, -90.1, -0.25))
             var_ds.append(var_year_idx)
         var_ds = xr.concat(var_ds, dim='time')
-        var_ds = transform_concat(var_ds, var)
+        var_ds = level2channel(var_ds, var)
         var_ds = var_ds.drop_vars("expver")
-        if idx == 0:
+        if data is not None:
             data = var_ds
         else:
             data = xr.concat([data, var_ds], dim='channel')
@@ -229,19 +204,24 @@ def generate_era5(basename="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/da
             var_path = os.path.join(var_need_path, var_needed_pl_dic.get(var), f'{year}')
             print(var, var_path)
             var_year_idx = xr.open_mfdataset(get_filenames(var_path))
-            var_year_idx = update_dims_era5(var_year_idx)
+            var_year_idx = update_dims(var_year_idx)
             var_ds.append(var_year_idx)
         var_ds_all_levels = xr.concat(var_ds, dim='time')
         for level in levels:
-            var_ds = var_ds_all_levels.sel(level=level).drop_vars(['expver', 'number'])
-            var_ds = transform_concat(var_ds, str(var) + str(level))
-            data = xr.concat([data, var_ds], dim='channel')
+            var_ds = var_ds_all_levels.sel(level=level)
+            var_ds = var_ds.drop_vars(['expver', 'number'])
+            var_ds = level2channel(var_ds, str(var) + str(level))
+            if data is not None:
+                data = xr.concat([data, var_ds], dim='channel')
+            else:
+                data = var_ds
 
     try:
         data = data.mean(dim=['expver']).transpose('variable', 'time', 'channel', 'lat', 'lon')
     except:
         data = data.transpose('variable', 'time', 'channel', 'lat', 'lon')
     data  = data.isel(variable=0).drop_vars("variable").to_dataset(name="data")
+    data = remove_unused_coords(data)
     return data
 
 
@@ -329,18 +309,12 @@ def step_to_time(ds):# 提取 time 和 step
     return ds
 
 
-
 # hres
 def read_hres_fcst(file_path):
     ds = xr.open_dataset(file_path, engine='cfgrib',backend_kwargs={'filter_by_keys':{'typeOfLevel':'surface', 'edition': 1}})
-    ds = update_dims_grib(ds, level_type='surface')
+    ds = update_dims(ds, level_type='surface')
     ds = ds.to_array().to_dataset(name="data").rename(variable="channel")
-    coord_names = list(ds._coord_names)
-    data_dims = list(ds['data'].dims)
-
-    # 利用集合的对称差运算符找出不相同的部分
-    unique_list = list(set(coord_names) ^ set(data_dims))
-    ds = ds.drop_vars(unique_list)
+    ds = remove_unused_coords(ds)
     ds = ds.assign_coords(lon=((ds.lon + 360) % 360))
     ds = ds.sortby('lon', ascending=True)
     return ds
@@ -467,7 +441,9 @@ def ens_data_read(fn_ls, N_CORE=10):
         ds_all.append(values.get())
     ds_all = xr.concat(ds_all, dim='time')
     ds_all = ds_all.sortby('time')
-    ds_all = ds_all.drop_vars(['step','surface']).to_array().rename({"variable":"channel"}).to_dataset(name='data')
+    # ds_all = ds_all.drop_vars(['step','surface'])
+    ds_all = remove_unused_coords(ds_all)
+    ds_all = ds_all.to_array().rename({"variable":"channel"}).to_dataset(name='data')
     return ds_all
 
 
