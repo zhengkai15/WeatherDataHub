@@ -169,7 +169,7 @@ def generate_era5(basename="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/da
     for fcst_day in range(fcst_days):
         years.append((init_time + pd.Timedelta(f"{fcst_day}D")).strftime("%Y"))
 
-    years = list(set(years))
+    years = sorted(set(years))
     era5_conf = Era5_Conf(version = version)
     var_needed_dic = era5_conf.var_needed_dic
     var_needed_pl_dic = era5_conf.var_needed_pl_dic
