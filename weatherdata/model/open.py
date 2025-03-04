@@ -18,7 +18,7 @@ def remove_unused_coords(ds):
         return ds.drop_vars(unique_list)
     
 def update_dims(ds, level_type='surface'):
-    if "valid_time" not in ds:
+    if "valid_time" in ds and "valid_time" not in ds.dims:
         ds = ds.expand_dims(["valid_time", "time"])
     name_dict = {
         "lead_time": "step",
